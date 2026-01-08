@@ -5,7 +5,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <thread>
+// #include <thread>  <-- Removed to fix MinGW compilation error
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -67,7 +67,9 @@ bool validateIncomingKey(const std::string& incoming) {
 }
 
 // Thread function to handle incoming input control packets
-void InputListener(SOCKET sock) {
+// Changed to DWORD WINAPI to work with CreateThread instead of std::thread
+DWORD WINAPI InputListener(LPVOID lpParam) {
+    SOCKET sock = (SOCKET)lpParam;
     sockaddr_in senderAddr;
     int senderSize = sizeof(senderAddr);
     char buffer[1024];
@@ -110,6 +112,7 @@ void InputListener(SOCKET sock) {
             }
         }
     }
+    return 0;
 }
 
 int main() {
@@ -174,8 +177,8 @@ int main() {
     
     // Start Input Listener Thread (It shares the 'sock' for receiving)
     // Note: In UDP, it's safe to recv in one thread and send in another on the same socket
-    std::thread inputThread(InputListener, sock);
-    inputThread.detach();
+    // REPLACED std::thread with CreateThread to fix MinGW compatibility
+    CreateThread(NULL, 0, InputListener, (LPVOID)sock, 0, NULL);
 
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
