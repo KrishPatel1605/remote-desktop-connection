@@ -51,7 +51,10 @@ def udp_listener(host_ip):
         sock.sendto(DEVICE_KEY.encode(), host_address)
     except: pass
 
-    frame_buffer = bytearray()
+    # Buffer state tracking to prevent screen tearing
+    frame_buffer = None
+    current_frame_size = 0
+    bytes_received = 0
     
     while is_running:
         try:
@@ -66,21 +69,46 @@ def udp_listener(host_ip):
             HOST_WIDTH = width
             HOST_HEIGHT = height
             
+            # --- TEARING FIX LOGIC ---
+            # 1. New Frame Detection
             if offset == 0:
                 frame_buffer = bytearray(total_size)
+                current_frame_size = total_size
+                bytes_received = 0
             
-            img_data = data[20:] 
-            if offset + len(img_data) <= total_size:
-                frame_buffer[offset : offset + len(img_data)] = img_data
+            # 2. Frame Consistency Check
+            # If we haven't started a frame yet, or this packet says the total size is different 
+            # than what we expect for the current frame, it belongs to a different frame (old or new).
+            # We discard it to prevent mixing Frame A data into Frame B buffer (Tearing).
+            if frame_buffer is None or total_size != current_frame_size:
+                continue
 
-            if offset + data_len >= total_size:
+            # 3. Store Data
+            img_data = data[20:] 
+            data_len_actual = len(img_data)
+            
+            if offset + data_len_actual <= current_frame_size:
+                frame_buffer[offset : offset + data_len_actual] = img_data
+                bytes_received += data_len_actual
+
+            # 4. Completion Check
+            # Only render if we have collected roughly the full amount of data.
+            # (>= check handles rare cases of duplicate packets overlapping)
+            if bytes_received >= current_frame_size:
                 try:
                     stream = io.BytesIO(frame_buffer)
                     img = Image.open(stream)
+                    # Verify it's a valid JPEG by forcing a load
+                    img.load() 
                     
                     with frame_lock:
                         current_frame = img
+                    
+                    # Reset after successful render to prevent reprocessing
+                    frame_buffer = None
+                    bytes_received = 0
                 except Exception as e:
+                    # corrupted jpeg, ignore
                     pass
                     
         except socket.timeout:
