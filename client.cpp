@@ -1,12 +1,16 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <gdiplus.h> // Added GDI+ for JPEG decoding
 #include <iostream>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "gdiplus.lib") // Link GDI+
+
+using namespace Gdiplus;
 
 #define HOST_PORT 50005
 #define CLIENT_PORT 50006
@@ -14,6 +18,8 @@
 
 std::string deviceKey = "TEST_KEY_123";
 
+// FIXED: Force packing to match Host and Python
+#pragma pack(push, 1)
 struct PacketHeader {
     int offset;
     int dataLen;
@@ -21,10 +27,10 @@ struct PacketHeader {
     int width;
     int height;
 };
+#pragma pack(pop)
 
-// Input Packet Structure (Must match Host)
 struct InputPacket {
-    int type; // 1=Move, 2=LDown, 3=LUp, 4=RDown, 5=RUp, 6=KeyDown, 7=KeyUp
+    int type; 
     int x;
     int y;
     int key;
@@ -32,65 +38,45 @@ struct InputPacket {
 
 // Globals
 HWND hwnd;
-HBITMAP hBitmap = NULL;
 int currentW = 0, currentH = 0;
-SOCKET sock; // Global socket for sending input
-sockaddr_in hostAddrGlobal; // Host address for sending input
+SOCKET sock; 
+sockaddr_in hostAddrGlobal; 
 std::vector<char> frameBuffer; 
 std::vector<char> displayBuffer; 
 
-// Input sending helper
 void SendInputPacket(int type, int x, int y, int key) {
     if (currentW == 0 || currentH == 0) return;
-
-    // Scale coordinates to the host's expected resolution (2340x1080)
-    // We assume the host is sending images at 2340x1080 (as per host code)
-    // The 'x' and 'y' here are relative to the client window client area
-    // We need to map [0, currentW] -> [0, 2340]
     
-    int hostW = 2340;
-    int hostH = 1080;
-
-    int scaledX = (x * hostW) / currentW;
-    int scaledY = (y * hostH) / currentH;
-
+    // Simple scaling assuming window rect matches stream rect
     InputPacket pkt;
     pkt.type = type;
-    pkt.x = scaledX;
-    pkt.y = scaledY;
+    pkt.x = x; 
+    pkt.y = y;
     pkt.key = key;
 
+    RECT rect;
+    if(GetClientRect(hwnd, &rect)) {
+        int winW = rect.right - rect.left;
+        int winH = rect.bottom - rect.top;
+        if (winW > 0 && winH > 0) {
+            // Scale mouse from Window Size to Stream Resolution
+            pkt.x = (x * currentW) / winW;
+            pkt.y = (y * currentH) / winH;
+        }
+    }
     sendto(sock, (char*)&pkt, sizeof(pkt), 0, (sockaddr*)&hostAddrGlobal, sizeof(hostAddrGlobal));
 }
 
 LRESULT CALLBACK WindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch(msg) {
-        case WM_DESTROY: 
-            PostQuitMessage(0); 
-            return 0;
-        
-        // --- Input Handling ---
-        case WM_MOUSEMOVE:
-            SendInputPacket(1, LOWORD(lp), HIWORD(lp), 0);
-            break;
-        case WM_LBUTTONDOWN:
-            SendInputPacket(2, LOWORD(lp), HIWORD(lp), 0);
-            break;
-        case WM_LBUTTONUP:
-            SendInputPacket(3, LOWORD(lp), HIWORD(lp), 0);
-            break;
-        case WM_RBUTTONDOWN:
-            SendInputPacket(4, LOWORD(lp), HIWORD(lp), 0);
-            break;
-        case WM_RBUTTONUP:
-            SendInputPacket(5, LOWORD(lp), HIWORD(lp), 0);
-            break;
-        case WM_KEYDOWN:
-            SendInputPacket(6, 0, 0, (int)wp); // wp contains VK code
-            break;
-        case WM_KEYUP:
-            SendInputPacket(7, 0, 0, (int)wp);
-            break;
+        case WM_DESTROY: PostQuitMessage(0); return 0;
+        case WM_MOUSEMOVE: SendInputPacket(1, LOWORD(lp), HIWORD(lp), 0); break;
+        case WM_LBUTTONDOWN: SendInputPacket(2, LOWORD(lp), HIWORD(lp), 0); break;
+        case WM_LBUTTONUP: SendInputPacket(3, LOWORD(lp), HIWORD(lp), 0); break;
+        case WM_RBUTTONDOWN: SendInputPacket(4, LOWORD(lp), HIWORD(lp), 0); break;
+        case WM_RBUTTONUP: SendInputPacket(5, LOWORD(lp), HIWORD(lp), 0); break;
+        case WM_KEYDOWN: SendInputPacket(6, 0, 0, (int)wp); break;
+        case WM_KEYUP: SendInputPacket(7, 0, 0, (int)wp); break;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -100,56 +86,70 @@ void initWindow() {
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.lpszClassName = L"RemoteDisplay";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW); // Show cursor
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassW(&wc);
-
-    hwnd = CreateWindowW(L"RemoteDisplay", L"Waiting for Stream...", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        100, 100, 800, 600, NULL, NULL, wc.hInstance, NULL);
+    hwnd = CreateWindowW(L"RemoteDisplay", L"Waiting for Stream...", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 800, 600, NULL, NULL, wc.hInstance, NULL);
 }
 
 void updateWindowSize(int w, int h) {
+    if (w <= 0 || h <= 0 || w > 10000 || h > 10000) return;
     if (w != currentW || h != currentH) {
         currentW = w;
         currentH = h;
-        frameBuffer.resize(w * h * 4);
-        displayBuffer.resize(w * h * 4);
+        try {
+            frameBuffer.resize(w * h * 4); // Roughly enough for raw, definitely enough for JPEG
+            displayBuffer.resize(w * h * 4);
+        } catch (...) { return; }
         
         SetWindowPos(hwnd, NULL, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
-        SetWindowTextW(hwnd, L"Remote Stream (Connected + Input Enabled)");
-        
-        HDC hdc = GetDC(hwnd);
-        if (hBitmap) DeleteObject(hBitmap);
-        hBitmap = CreateCompatibleBitmap(hdc, w, h);
-        ReleaseDC(hwnd, hdc);
+        SetWindowTextW(hwnd, L"Remote Stream (Connected)");
     }
 }
 
-void drawFrame() {
-    if (!hBitmap || currentW == 0) return;
+// FIXED: Draw function now Decodes JPEG instead of dumping raw bits
+void drawFrame(int dataSize) {
+    if (currentW == 0 || dataSize <= 0) return;
 
-    HDC hdc = GetDC(hwnd);
-    HDC memDC = CreateCompatibleDC(hdc);
-    SelectObject(memDC, hBitmap);
+    // 1. Create IStream from the Memory Buffer containing the JPEG
+    IStream* pStream = NULL;
+    // We must allocate global memory for CreateStreamOnHGlobal to work reliably with GDI+
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, dataSize);
+    if (!hMem) return;
+    
+    void* pData = GlobalLock(hMem);
+    memcpy(pData, displayBuffer.data(), dataSize);
+    GlobalUnlock(hMem);
 
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = currentW;
-    bmi.bmiHeader.biHeight = -currentH;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    SetDIBits(memDC, hBitmap, 0, currentH, displayBuffer.data(), &bmi, DIB_RGB_COLORS);
-    BitBlt(hdc, 0, 0, currentW, currentH, memDC, 0, 0, SRCCOPY);
-
-    DeleteDC(memDC);
-    ReleaseDC(hwnd, hdc);
+    if (CreateStreamOnHGlobal(hMem, TRUE, &pStream) == S_OK) {
+        // 2. Load Image from Stream (Decodes JPEG)
+        Bitmap* bmp = Bitmap::FromStream(pStream);
+        if (bmp && bmp->GetLastStatus() == Ok) {
+            
+            // 3. Draw to Screen
+            HDC hdc = GetDC(hwnd);
+            Graphics graphics(hdc);
+            
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            graphics.DrawImage(bmp, 0, 0, rect.right, rect.bottom); // Draw scaled to window
+            
+            ReleaseDC(hwnd, hdc);
+            delete bmp;
+        }
+        pStream->Release();
+    }
+    // hMem is freed by pStream->Release() because fDeleteOnRelease=TRUE
 }
 
 int main() {
     std::string targetIP;
-    std::cout << "Enter Host IP (e.g., 127.0.0.1 or 192.168.1.5): ";
+    std::cout << "Enter Host IP: ";
     std::cin >> targetIP;
+
+    // Initialize GDI+ for Client too!
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
 
     initWindow();
 
@@ -159,7 +159,6 @@ int main() {
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     int buffSize = 1024 * 1024 * 10; 
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&buffSize, sizeof(buffSize));
-
     DWORD timeout = 2000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
@@ -177,9 +176,8 @@ int main() {
     hostAddrGlobal.sin_port = htons(HOST_PORT);
     hostAddrGlobal.sin_addr.s_addr = inet_addr(targetIP.c_str());
 
-    // Send Auth
     sendto(sock, deviceKey.c_str(), deviceKey.size(), 0, (sockaddr*)&hostAddrGlobal, sizeof(hostAddrGlobal));
-    std::cout << "[INFO] Sent auth key. Input is enabled.\n";
+    std::cout << "[INFO] Connected. Window should appear shortly.\n";
 
     std::vector<char> recvBuffer(MAX_PACKET_SIZE);
     sockaddr_in senderAddr;
@@ -207,7 +205,8 @@ int main() {
 
             if (header->offset + header->dataLen >= header->totalSize) {
                 displayBuffer = frameBuffer; 
-                drawFrame();
+                // Pass total size to draw function so it knows how much of buffer is real JPEG
+                drawFrame(header->totalSize); 
             }
         }
     }

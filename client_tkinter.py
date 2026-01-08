@@ -13,7 +13,7 @@ CLIENT_PORT = 50006
 DEVICE_KEY = "TEST_KEY_123"
 MAX_PACKET_SIZE = 65535
 
-# Expected Host Resolution (Must match Host 'sendW'/'sendH')
+# Expected Host Resolution (Fallback if needed)
 HOST_WIDTH = 2340
 HOST_HEIGHT = 1080
 
@@ -27,7 +27,7 @@ client_sock = None
 host_address = None
 
 def udp_listener(host_ip):
-    global current_frame, is_running, client_sock, host_address
+    global current_frame, is_running, client_sock, host_address, HOST_WIDTH, HOST_HEIGHT
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -57,14 +57,19 @@ def udp_listener(host_ip):
         try:
             data, addr = sock.recvfrom(MAX_PACKET_SIZE)
             
-            if len(data) < 16: continue 
+            # FIXED: With #pragma pack(1) in C++, header is exactly 20 bytes.
+            if len(data) < 20: continue 
 
-            offset, data_len, total_size, img_type = struct.unpack('iiii', data[:16])
+            offset, data_len, total_size, width, height = struct.unpack('iiiii', data[:20])
+            
+            # Update globals for input scaling
+            HOST_WIDTH = width
+            HOST_HEIGHT = height
             
             if offset == 0:
                 frame_buffer = bytearray(total_size)
             
-            img_data = data[16:]
+            img_data = data[20:] 
             if offset + len(img_data) <= total_size:
                 frame_buffer[offset : offset + len(img_data)] = img_data
 
@@ -95,15 +100,25 @@ class RemoteScreenApp:
         
         self.label = tk.Label(root, text="Connecting...", bg="black", fg="white")
         self.label.pack(expand=True, fill=tk.BOTH)
+
+        # Touch state for "Tap to Click" vs "Drag to Hover"
+        self.touch_start_x = 0
+        self.touch_start_y = 0
         
         # --- Input Bindings ---
-        # Mouse Move
+        # Standard Mouse Move (Desktop)
         self.label.bind('<Motion>', self.on_mouse_move)
-        # Mouse Clicks
-        self.label.bind('<Button-1>', lambda e: self.send_input(2, e.x, e.y, 0)) # LDown
-        self.label.bind('<ButtonRelease-1>', lambda e: self.send_input(3, e.x, e.y, 0)) # LUp
+        
+        # Touch / Left Click Handling
+        # Replaced direct LDown/LUp with logic to separate Drag (Hover) from Tap (Click)
+        self.label.bind('<Button-1>', self.on_touch_start)
+        self.label.bind('<B1-Motion>', self.on_touch_move) 
+        self.label.bind('<ButtonRelease-1>', self.on_touch_end)
+        
+        # Right Click (Keep standard)
         self.label.bind('<Button-3>', lambda e: self.send_input(4, e.x, e.y, 0)) # RDown
         self.label.bind('<ButtonRelease-3>', lambda e: self.send_input(5, e.x, e.y, 0)) # RUp
+        
         # Keyboard
         self.root.bind('<KeyPress>', self.on_key_down)
         self.root.bind('<KeyRelease>', self.on_key_up)
@@ -128,7 +143,6 @@ class RemoteScreenApp:
         scaled_y = int((y / win_h) * HOST_HEIGHT)
 
         # Struct format: 4 ints (type, x, y, key)
-        # Note: 'key' is mapped to Windows VK code if possible
         packet = struct.pack('iiii', type_id, scaled_x, scaled_y, key)
         
         try:
@@ -138,6 +152,30 @@ class RemoteScreenApp:
     def on_mouse_move(self, event):
         # Throttle moves if necessary, but UDP is fast
         self.send_input(1, event.x, event.y, 0)
+
+    # --- Touch Handling Logic ---
+    def on_touch_start(self, event):
+        # Record start position
+        self.touch_start_x = event.x
+        self.touch_start_y = event.y
+        # Move cursor immediately to finger position (Hover)
+        self.send_input(1, event.x, event.y, 0)
+
+    def on_touch_move(self, event):
+        # When dragging finger, treated as Moving Mouse (Hover), NOT dragging selection
+        self.send_input(1, event.x, event.y, 0)
+
+    def on_touch_end(self, event):
+        # Check if we moved significantly
+        dx = abs(event.x - self.touch_start_x)
+        dy = abs(event.y - self.touch_start_y)
+        
+        # If movement is small (< 5 pixels), treat it as a TAP (Click)
+        if dx < 5 and dy < 5:
+            self.send_input(2, event.x, event.y, 0) # LDown
+            self.send_input(3, event.x, event.y, 0) # LUp
+        
+        # If moved > 5 pixels, it was just a hover move, do nothing on release.
 
     def on_key_down(self, event):
         # event.keycode on Windows usually matches VK codes
