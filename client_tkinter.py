@@ -13,17 +13,25 @@ CLIENT_PORT = 50006
 DEVICE_KEY = "TEST_KEY_123"
 MAX_PACKET_SIZE = 65535
 
+# Expected Host Resolution (Must match Host 'sendW'/'sendH')
+HOST_WIDTH = 2340
+HOST_HEIGHT = 1080
+
 # Global variables
 current_frame = None
 is_running = True
 frame_lock = threading.Lock()
 
+# Socket for sending input (shared)
+client_sock = None
+host_address = None
+
 def udp_listener(host_ip):
-    global current_frame, is_running
+    global current_frame, is_running, client_sock, host_address
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024) # 2MB Buffer is enough for JPEG
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024) 
     except: pass
 
     try:
@@ -34,9 +42,13 @@ def udp_listener(host_ip):
 
     sock.settimeout(1.0) 
 
+    # Shared socket reference for input sending
+    client_sock = sock
+    host_address = (host_ip, HOST_PORT)
+
     # Auth
     try:
-        sock.sendto(DEVICE_KEY.encode(), (host_ip, HOST_PORT))
+        sock.sendto(DEVICE_KEY.encode(), host_address)
     except: pass
 
     frame_buffer = bytearray()
@@ -45,24 +57,19 @@ def udp_listener(host_ip):
         try:
             data, addr = sock.recvfrom(MAX_PACKET_SIZE)
             
-            if len(data) < 16: continue # Header is smaller now
+            if len(data) < 16: continue 
 
-            # Header: offset, dataLen, totalSize, type
             offset, data_len, total_size, img_type = struct.unpack('iiii', data[:16])
             
-            # Reset buffer for new frame (offset 0)
             if offset == 0:
                 frame_buffer = bytearray(total_size)
             
-            # Copy data
             img_data = data[16:]
             if offset + len(img_data) <= total_size:
                 frame_buffer[offset : offset + len(img_data)] = img_data
 
-            # Render if complete
             if offset + data_len >= total_size:
                 try:
-                    # Load JPEG directly from memory
                     stream = io.BytesIO(frame_buffer)
                     img = Image.open(stream)
                     
@@ -72,7 +79,9 @@ def udp_listener(host_ip):
                     pass
                     
         except socket.timeout:
-            sock.sendto(DEVICE_KEY.encode(), (host_ip, HOST_PORT))
+            # Keep alive / re-auth
+            if client_sock and host_address:
+                sock.sendto(DEVICE_KEY.encode(), host_address)
         except OSError:
             break
 
@@ -81,17 +90,61 @@ def udp_listener(host_ip):
 class RemoteScreenApp:
     def __init__(self, root, host_ip):
         self.root = root
-        self.root.title("Remote Stream (MJPEG)")
+        self.root.title("Remote Stream (MJPEG + Input)")
         self.root.geometry("800x600")
         
         self.label = tk.Label(root, text="Connecting...", bg="black", fg="white")
         self.label.pack(expand=True, fill=tk.BOTH)
         
+        # --- Input Bindings ---
+        # Mouse Move
+        self.label.bind('<Motion>', self.on_mouse_move)
+        # Mouse Clicks
+        self.label.bind('<Button-1>', lambda e: self.send_input(2, e.x, e.y, 0)) # LDown
+        self.label.bind('<ButtonRelease-1>', lambda e: self.send_input(3, e.x, e.y, 0)) # LUp
+        self.label.bind('<Button-3>', lambda e: self.send_input(4, e.x, e.y, 0)) # RDown
+        self.label.bind('<ButtonRelease-3>', lambda e: self.send_input(5, e.x, e.y, 0)) # RUp
+        # Keyboard
+        self.root.bind('<KeyPress>', self.on_key_down)
+        self.root.bind('<KeyRelease>', self.on_key_up)
+
         self.thread = threading.Thread(target=udp_listener, args=(host_ip,))
         self.thread.daemon = True
         self.thread.start()
         
         self.update_ui()
+
+    def send_input(self, type_id, x, y, key):
+        if not client_sock or not host_address: return
+
+        # Get current display size of the label/image
+        win_w = self.label.winfo_width()
+        win_h = self.label.winfo_height()
+
+        if win_w == 0 or win_h == 0: return
+
+        # Scale coordinates to Host Resolution
+        scaled_x = int((x / win_w) * HOST_WIDTH)
+        scaled_y = int((y / win_h) * HOST_HEIGHT)
+
+        # Struct format: 4 ints (type, x, y, key)
+        # Note: 'key' is mapped to Windows VK code if possible
+        packet = struct.pack('iiii', type_id, scaled_x, scaled_y, key)
+        
+        try:
+            client_sock.sendto(packet, host_address)
+        except: pass
+
+    def on_mouse_move(self, event):
+        # Throttle moves if necessary, but UDP is fast
+        self.send_input(1, event.x, event.y, 0)
+
+    def on_key_down(self, event):
+        # event.keycode on Windows usually matches VK codes
+        self.send_input(6, 0, 0, event.keycode)
+
+    def on_key_up(self, event):
+        self.send_input(7, 0, 0, event.keycode)
 
     def update_ui(self):
         global current_frame
@@ -100,7 +153,6 @@ class RemoteScreenApp:
             current_frame = None 
 
         if img:
-            # Resize to fit window (optional)
             win_w = self.root.winfo_width()
             win_h = self.root.winfo_height()
             if win_w > 1 and win_h > 1:

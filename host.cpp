@@ -5,6 +5,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <thread>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -17,10 +18,15 @@ using namespace Gdiplus;
 #define MAX_PACKET_SIZE 60000 
 
 // JPEG Compression Quality (0-100)
-// 50 is a good balance for speed/size
 #define JPEG_QUALITY 50 
 
 std::string deviceKey = "TEST_KEY_123";
+
+// Globals for screen metrics to be used by input thread
+int g_screenW = 0;
+int g_screenH = 0;
+int g_sendW = 2340;
+int g_sendH = 1080;
 
 struct PacketHeader {
     int offset;
@@ -29,10 +35,17 @@ struct PacketHeader {
     int type; // 0 = Raw, 1 = JPEG
 };
 
-// Helper to get encoder CLSID for JPEG
+// Input Packet Structure
+struct InputPacket {
+    int type; // 1=Move, 2=LDown, 3=LUp, 4=RDown, 5=RUp, 6=KeyDown, 7=KeyUp
+    int x;
+    int y;
+    int key;
+};
+
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
-    UINT  num = 0;          // number of image encoders
-    UINT  size = 0;         // size of the image encoder array in bytes
+    UINT  num = 0;
+    UINT  size = 0;
     GetImageEncodersSize(&num, &size);
     if (size == 0) return -1;
     ImageCodecInfo* pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
@@ -51,6 +64,52 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
 
 bool validateIncomingKey(const std::string& incoming) {
     return incoming == deviceKey;
+}
+
+// Thread function to handle incoming input control packets
+void InputListener(SOCKET sock) {
+    sockaddr_in senderAddr;
+    int senderSize = sizeof(senderAddr);
+    char buffer[1024];
+
+    std::cout << "[INFO] Input Listener started on port " << LISTEN_PORT << "\n";
+
+    while (true) {
+        int recvLen = recvfrom(sock, buffer, sizeof(buffer), 0, (sockaddr*)&senderAddr, &senderSize);
+        if (recvLen == sizeof(InputPacket)) {
+            InputPacket* pkt = (InputPacket*)buffer;
+
+            // Map incoming resolution (2340x1080) back to real screen resolution
+            int realX = (pkt->x * g_screenW) / g_sendW;
+            int realY = (pkt->y * g_screenH) / g_sendH;
+
+            switch (pkt->type) {
+            case 1: // Move
+                SetCursorPos(realX, realY);
+                break;
+            case 2: // LDown
+                SetCursorPos(realX, realY); // Ensure cursor is there before click
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                break;
+            case 3: // LUp
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                break;
+            case 4: // RDown
+                SetCursorPos(realX, realY);
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                break;
+            case 5: // RUp
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+                break;
+            case 6: // KeyDown
+                keybd_event((BYTE)pkt->key, 0, 0, 0);
+                break;
+            case 7: // KeyUp
+                keybd_event((BYTE)pkt->key, 0, KEYEVENTF_KEYUP, 0);
+                break;
+            }
+        }
+    }
 }
 
 int main() {
@@ -77,6 +136,8 @@ int main() {
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
     int buffSize = 1024 * 1024 * 10;
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&buffSize, sizeof(buffSize));
+    // Also set receive buffer for input packets
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&buffSize, sizeof(buffSize));
 
     sockaddr_in serverAddr{}, clientAddr{};
     serverAddr.sin_family = AF_INET;
@@ -94,10 +155,12 @@ int main() {
     char authBuffer[1024];
     bool authenticated = false;
 
+    // Simple Auth Loop
     while (!authenticated) {
         int recvLen = recvfrom(sock, authBuffer, sizeof(authBuffer)-1, 0, (sockaddr*)&clientAddr, &clientSize);
         if (recvLen > 0) {
             authBuffer[recvLen] = '\0';
+            // Check if it looks like a key (simple string check)
             if (validateIncomingKey(authBuffer)) {
                 authenticated = true;
                 clientAddr.sin_port = htons(STREAM_PORT);
@@ -106,42 +169,42 @@ int main() {
         }
     }
 
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    g_screenW = GetSystemMetrics(SM_CXSCREEN);
+    g_screenH = GetSystemMetrics(SM_CYSCREEN);
     
-    // --- USER REQUESTED RESOLUTION ---
-    // Forcing exact resolution: 2340x1080
-    int sendW = 2340;
-    int sendH = 1080;
-    
+    // Start Input Listener Thread (It shares the 'sock' for receiving)
+    // Note: In UDP, it's safe to recv in one thread and send in another on the same socket
+    std::thread inputThread(InputListener, sock);
+    inputThread.detach();
+
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
-    HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, sendW, sendH);
+    HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, g_sendW, g_sendH);
     SelectObject(memDC, hBitmap);
     SetStretchBltMode(memDC, COLORONCOLOR);
 
     std::vector<char> sendBuffer(MAX_PACKET_SIZE + sizeof(PacketHeader));
     IStream* pStream = NULL;
 
-    std::cout << "[INFO] Streaming MJPEG at " << sendW << "x" << sendH << " (Forced Res)\n";
+    std::cout << "[INFO] Streaming MJPEG at " << g_sendW << "x" << g_sendH << "\n";
 
     while (true) {
         // Capture
-        StretchBlt(memDC, 0, 0, sendW, sendH, screenDC, 0, 0, screenW, screenH, SRCCOPY);
+        StretchBlt(memDC, 0, 0, g_sendW, g_sendH, screenDC, 0, 0, g_screenW, g_screenH, SRCCOPY);
 
-        // Compress to JPEG in Memory
+        // Compress
         CreateStreamOnHGlobal(NULL, TRUE, &pStream);
         Bitmap* bmp = Bitmap::FromHBITMAP(hBitmap, NULL);
         bmp->Save(pStream, &jpgClsid, &encoderParameters);
-        delete bmp; // Cleanup GDI+ wrapper
+        delete bmp; 
 
-        // Get Pointer to Data
+        // Get Data
         HGLOBAL hMem = NULL;
         GetHGlobalFromStream(pStream, &hMem);
         void* pData = GlobalLock(hMem);
         int streamSize = GlobalSize(hMem);
 
-        // Fragment and Send
+        // Fragment
         int currentOffset = 0;
         char* pBytes = (char*)pData;
 
@@ -153,7 +216,7 @@ int main() {
             header.offset = currentOffset;
             header.dataLen = chunkLen;
             header.totalSize = streamSize;
-            header.type = 1; // 1 = JPEG
+            header.type = 1; 
 
             memcpy(sendBuffer.data(), &header, sizeof(PacketHeader));
             memcpy(sendBuffer.data() + sizeof(PacketHeader), pBytes + currentOffset, chunkLen);
@@ -161,14 +224,12 @@ int main() {
             sendto(sock, sendBuffer.data(), sizeof(PacketHeader) + chunkLen, 0, (sockaddr*)&clientAddr, sizeof(clientAddr));
             currentOffset += chunkLen;
             
-            // Tiny sleep to prevent UDP packet loss on router
             if (chunkLen == MAX_PACKET_SIZE) Sleep(1);
         }
 
         GlobalUnlock(hMem);
         pStream->Release();
 
-        // 30 FPS target
-        Sleep(33);
+        Sleep(33); // ~30 FPS
     }
 }
