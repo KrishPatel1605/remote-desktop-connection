@@ -210,6 +210,7 @@ class RemoteScreenApp:
         self.send_input(6, 0, 0, event.keycode)
 
     def on_key_up(self, event):
+        # event.keycode on Windows usually matches VK codes
         self.send_input(7, 0, 0, event.keycode)
 
     def update_ui(self):
