@@ -13,8 +13,8 @@ CLIENT_PORT = 50006
 DEVICE_KEY = "TEST_KEY_123"
 MAX_PACKET_SIZE = 65535
 
-# Expected Host Resolution (Fallback if needed)
-HOST_WIDTH = 2340
+# CHANGED: Default Host Resolution to 1920x1080
+HOST_WIDTH = 1920
 HOST_HEIGHT = 1080
 
 # Global variables

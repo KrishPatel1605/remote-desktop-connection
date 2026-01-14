@@ -21,7 +21,9 @@ std::string deviceKey = "TEST_KEY_123";
 
 int g_screenW = 0;
 int g_screenH = 0;
-int g_sendW = 2340;
+
+// CHANGED: Resolution set to 1920x1080
+int g_sendW = 1920;
 int g_sendH = 1080;
 
 #pragma pack(push, 1)
@@ -177,7 +179,7 @@ int main()
         return 1;
     }
 
-    std::cout << "[INFO] Host is running. Waiting for connection on port " << LISTEN_PORT << "...\n";
+    std::cout << "[INFO] Host is running (1920x1080). Waiting for connection on port " << LISTEN_PORT << "...\n";
 
     int clientSize = sizeof(clientAddr);
     char authBuffer[1024];
