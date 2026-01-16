@@ -51,6 +51,27 @@ struct InputPacket
     int key;
 };
 
+// Check if the process has Administrator privileges
+bool IsElevated()
+{
+    bool fRet = false;
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        TOKEN_ELEVATION Elevation;
+        DWORD cbSize = sizeof(TOKEN_ELEVATION);
+        if (GetTokenInformation(hToken, TokenElevation, &Elevation, sizeof(Elevation), &cbSize))
+        {
+            fRet = Elevation.TokenIsElevated;
+        }
+    }
+    if (hToken)
+    {
+        CloseHandle(hToken);
+    }
+    return fRet;
+}
+
 // Enhanced reporter to find the correct local IP for your router table
 void PrintLocalIPInfo()
 {
@@ -153,6 +174,17 @@ int main()
 {
     // CHANGED: Fix for "cut off" screen and incorrect mouse mapping on high DPI displays
     SetProcessDPIAware();
+
+    // WARNING CHECK: Inform user if not running as Admin
+    if (!IsElevated())
+    {
+        std::cout << "\n===================================================\n";
+        std::cout << "[WARNING] NOT RUNNING AS ADMINISTRATOR\n";
+        std::cout << "You will NOT be able to control Task Manager or \n";
+        std::cout << "other system windows unless you run this as Admin.\n";
+        std::cout << "Please restart and 'Run as Administrator'.\n";
+        std::cout << "===================================================\n\n";
+    }
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
