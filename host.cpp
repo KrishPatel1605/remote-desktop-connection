@@ -1,3 +1,8 @@
+// DEFINED FIRST: Force Windows 7+ API visibility to fix "SetProcessDPIAware undefined"
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601 
+#endif
+
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -9,6 +14,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "user32.lib")
 
 using namespace Gdiplus;
 
@@ -107,6 +113,8 @@ DWORD WINAPI InputListener(LPVOID lpParam)
         if (recvLen == sizeof(InputPacket))
         {
             InputPacket *pkt = (InputPacket *)buffer;
+            
+            // Map input back to real screen coordinates
             int realX = (pkt->x * g_screenW) / g_sendW;
             int realY = (pkt->y * g_screenH) / g_sendH;
 
@@ -143,6 +151,9 @@ DWORD WINAPI InputListener(LPVOID lpParam)
 
 int main()
 {
+    // CHANGED: Fix for "cut off" screen and incorrect mouse mapping on high DPI displays
+    SetProcessDPIAware();
+
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
@@ -202,6 +213,7 @@ int main()
 
     g_screenW = GetSystemMetrics(SM_CXSCREEN);
     g_screenH = GetSystemMetrics(SM_CYSCREEN);
+    std::cout << "[INFO] Capturing Real Screen Size: " << g_screenW << "x" << g_screenH << "\n";
 
     CreateThread(NULL, 0, InputListener, (LPVOID)sock, 0, NULL);
 
@@ -216,7 +228,9 @@ int main()
 
     while (true)
     {
+        // StretchBlt captures the screen (screenDC) and resizes it to our send resolution (memDC)
         StretchBlt(memDC, 0, 0, g_sendW, g_sendH, screenDC, 0, 0, g_screenW, g_screenH, SRCCOPY);
+        
         CreateStreamOnHGlobal(NULL, TRUE, &pStream);
         Bitmap *bmp = Bitmap::FromHBITMAP(hBitmap, NULL);
         bmp->Save(pStream, &jpgClsid, &encoderParameters);
