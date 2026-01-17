@@ -1,1 +1,0 @@
-g++ host.cpp -o host.exe -lws2_32 -lgdi32 -luuid

@@ -1,0 +1,1 @@
+powershell Start-Process -FilePath ".\host.exe" -Verb RunAs
