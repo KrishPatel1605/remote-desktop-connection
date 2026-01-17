@@ -1,4 +1,4 @@
-// DEFINED FIRST: Force Windows 7+ API visibility to fix "SetProcessDPIAware undefined"
+// DEFINED FIRST: Force Windows 7+ API visibility
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601 
 #endif
@@ -20,17 +20,19 @@ using namespace Gdiplus;
 
 #define LISTEN_PORT 50005
 #define STREAM_PORT 50006
-#define MAX_PACKET_SIZE 60000
-#define JPEG_QUALITY 40
+// Max UDP packet size (safe zone)
+#define MAX_PACKET_SIZE 60000 
+// Lower quality = Higher FPS. 25-35 is the sweet spot for speed.
+#define JPEG_QUALITY 25 
 
 std::string deviceKey = "TEST_KEY_123";
 
 int g_screenW = 0;
 int g_screenH = 0;
 
-// CHANGED: Resolution set to 1920x1080
-int g_sendW = 1920;
-int g_sendH = 1080;
+// OPTIMIZATION: 1280x720 provides MUCH higher FPS than 1080p for GDI+ encoding
+int g_sendW = 1280;
+int g_sendH = 720;
 
 #pragma pack(push, 1)
 struct PacketHeader
@@ -51,7 +53,6 @@ struct InputPacket
     int key;
 };
 
-// Check if the process has Administrator privileges
 bool IsElevated()
 {
     bool fRet = false;
@@ -65,14 +66,10 @@ bool IsElevated()
             fRet = Elevation.TokenIsElevated;
         }
     }
-    if (hToken)
-    {
-        CloseHandle(hToken);
-    }
+    if (hToken) CloseHandle(hToken);
     return fRet;
 }
 
-// Enhanced reporter to find the correct local IP for your router table
 void PrintLocalIPInfo()
 {
     char szHostName[255];
@@ -87,7 +84,6 @@ void PrintLocalIPInfo()
                 char *szLocalIP = inet_ntoa(*(struct in_addr *)host_entry->h_addr_list[i]);
                 std::cout << "[CHECK] Found Local IP: " << szLocalIP << "\n";
             }
-            std::cout << "[ACTION] Ensure the IP in your Router Table matches one of these.\n";
             std::cout << "-----------------------------------\n";
         }
     }
@@ -97,11 +93,9 @@ int GetEncoderClsid(const WCHAR *format, CLSID *pClsid)
 {
     UINT num = 0, size = 0;
     GetImageEncodersSize(&num, &size);
-    if (size == 0)
-        return -1;
+    if (size == 0) return -1;
     ImageCodecInfo *pImageCodecInfo = (ImageCodecInfo *)(malloc(size));
-    if (pImageCodecInfo == NULL)
-        return -1;
+    if (pImageCodecInfo == NULL) return -1;
     GetImageEncoders(num, size, pImageCodecInfo);
     for (UINT j = 0; j < num; ++j)
     {
@@ -141,29 +135,13 @@ DWORD WINAPI InputListener(LPVOID lpParam)
 
             switch (pkt->type)
             {
-            case 1:
-                SetCursorPos(realX, realY);
-                break;
-            case 2:
-                SetCursorPos(realX, realY);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                break;
-            case 3:
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                break;
-            case 4:
-                SetCursorPos(realX, realY);
-                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-                break;
-            case 5:
-                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-                break;
-            case 6:
-                keybd_event((BYTE)pkt->key, 0, 0, 0);
-                break;
-            case 7:
-                keybd_event((BYTE)pkt->key, 0, KEYEVENTF_KEYUP, 0);
-                break;
+            case 1: SetCursorPos(realX, realY); break;
+            case 2: SetCursorPos(realX, realY); mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); break;
+            case 3: mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0); break;
+            case 4: SetCursorPos(realX, realY); mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0); break;
+            case 5: mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0); break;
+            case 6: keybd_event((BYTE)pkt->key, 0, 0, 0); break;
+            case 7: keybd_event((BYTE)pkt->key, 0, KEYEVENTF_KEYUP, 0); break;
             }
         }
     }
@@ -172,23 +150,15 @@ DWORD WINAPI InputListener(LPVOID lpParam)
 
 int main()
 {
-    // CHANGED: Fix for "cut off" screen and incorrect mouse mapping on high DPI displays
     SetProcessDPIAware();
 
-    // WARNING CHECK: Inform user if not running as Admin
     if (!IsElevated())
     {
-        std::cout << "\n===================================================\n";
-        std::cout << "[WARNING] NOT RUNNING AS ADMINISTRATOR\n";
-        std::cout << "You will NOT be able to control Task Manager or \n";
-        std::cout << "other system windows unless you run this as Admin.\n";
-        std::cout << "Please restart and 'Run as Administrator'.\n";
-        std::cout << "===================================================\n\n";
+        std::cout << "[WARNING] Not running as Admin. Input into Task Manager will fail.\n";
     }
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
-
     PrintLocalIPInfo();
 
     GdiplusStartupInput gdiplusStartupInput;
@@ -222,7 +192,7 @@ int main()
         return 1;
     }
 
-    std::cout << "[INFO] Host is running (1920x1080). Waiting for connection on port " << LISTEN_PORT << "...\n";
+    std::cout << "[INFO] Host is running (1280x720 High Perf). Waiting on port " << LISTEN_PORT << "...\n";
 
     int clientSize = sizeof(clientAddr);
     char authBuffer[1024];
@@ -238,14 +208,13 @@ int main()
             {
                 authenticated = true;
                 clientAddr.sin_port = htons(STREAM_PORT);
-                std::cout << "[SUCCESS] External Client authenticated from: " << inet_ntoa(clientAddr.sin_addr) << "\n";
+                std::cout << "[SUCCESS] Client authenticated.\n";
             }
         }
     }
 
     g_screenW = GetSystemMetrics(SM_CXSCREEN);
     g_screenH = GetSystemMetrics(SM_CYSCREEN);
-    std::cout << "[INFO] Capturing Real Screen Size: " << g_screenW << "x" << g_screenH << "\n";
 
     CreateThread(NULL, 0, InputListener, (LPVOID)sock, 0, NULL);
 
@@ -253,51 +222,62 @@ int main()
     HDC memDC = CreateCompatibleDC(screenDC);
     HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, g_sendW, g_sendH);
     SelectObject(memDC, hBitmap);
-    SetStretchBltMode(memDC, COLORONCOLOR);
+    SetStretchBltMode(memDC, COLORONCOLOR); // Fastest scaling mode
 
     std::vector<char> sendBuffer(MAX_PACKET_SIZE + sizeof(PacketHeader));
     IStream *pStream = NULL;
 
+    // OPTIMIZATION: Pre-calculate header base to save cycles inside loop
+    PacketHeader headerBase;
+    headerBase.width = g_sendW;
+    headerBase.height = g_sendH;
+
     while (true)
     {
-        // StretchBlt captures the screen (screenDC) and resizes it to our send resolution (memDC)
+        // 1. Capture & Resize
         StretchBlt(memDC, 0, 0, g_sendW, g_sendH, screenDC, 0, 0, g_screenW, g_screenH, SRCCOPY);
         
+        // 2. Encode to JPEG (The heavy lifting)
         CreateStreamOnHGlobal(NULL, TRUE, &pStream);
         Bitmap *bmp = Bitmap::FromHBITMAP(hBitmap, NULL);
         bmp->Save(pStream, &jpgClsid, &encoderParameters);
-        delete bmp;
+        delete bmp; // Clean up bitmap object fast
 
+        // 3. Get raw bytes
         HGLOBAL hMem = NULL;
         GetHGlobalFromStream(pStream, &hMem);
         void *pData = GlobalLock(hMem);
         int streamSize = GlobalSize(hMem);
         char *pBytes = (char *)pData;
 
+        // 4. Send UDP packets BURST (No sleep!)
         int currentOffset = 0;
+        headerBase.totalSize = streamSize; // Update total size for this frame
+
         while (currentOffset < streamSize)
         {
             int remaining = streamSize - currentOffset;
             int chunkLen = (remaining > MAX_PACKET_SIZE) ? MAX_PACKET_SIZE : remaining;
 
-            PacketHeader header;
-            header.offset = currentOffset;
-            header.dataLen = chunkLen;
-            header.totalSize = streamSize;
-            header.width = g_sendW;
-            header.height = g_sendH;
+            headerBase.offset = currentOffset;
+            headerBase.dataLen = chunkLen;
 
-            memcpy(sendBuffer.data(), &header, sizeof(PacketHeader));
+            // Fast copy
+            memcpy(sendBuffer.data(), &headerBase, sizeof(PacketHeader));
             memcpy(sendBuffer.data() + sizeof(PacketHeader), pBytes + currentOffset, chunkLen);
 
             sendto(sock, sendBuffer.data(), sizeof(PacketHeader) + chunkLen, 0, (sockaddr *)&clientAddr, sizeof(clientAddr));
             currentOffset += chunkLen;
-            if (chunkLen == MAX_PACKET_SIZE)
-                Sleep(2);
+            
+            // REMOVED SLEEP here. 
+            // On very fast networks, this is fine. 
+            // If dropping packets, add Sleep(1) only if needed.
         }
 
         GlobalUnlock(hMem);
         pStream->Release();
-        Sleep(33);
+        
+        // REMOVED MAIN LOOP SLEEP
+        // Let it run as fast as the CPU/Network can handle.
     }
 }

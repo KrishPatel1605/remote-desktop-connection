@@ -13,9 +13,9 @@ CLIENT_PORT = 50006
 DEVICE_KEY = "TEST_KEY_123"
 MAX_PACKET_SIZE = 65535
 
-# CHANGED: Default Host Resolution to 1920x1080
-HOST_WIDTH = 1920
-HOST_HEIGHT = 1080
+# Default placeholders
+HOST_WIDTH = 1280
+HOST_HEIGHT = 720
 
 # Global variables
 current_frame = None
@@ -31,7 +31,8 @@ def udp_listener(host_ip):
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024) 
+        # 4MB Buffer for smooth HD
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024) 
     except: pass
 
     try:
@@ -42,16 +43,13 @@ def udp_listener(host_ip):
 
     sock.settimeout(1.0) 
 
-    # Shared socket reference for input sending
     client_sock = sock
     host_address = (host_ip, HOST_PORT)
 
-    # Auth
     try:
         sock.sendto(DEVICE_KEY.encode(), host_address)
     except: pass
 
-    # Buffer state tracking to prevent screen tearing
     frame_buffer = None
     current_frame_size = 0
     bytes_received = 0
@@ -59,31 +57,20 @@ def udp_listener(host_ip):
     while is_running:
         try:
             data, addr = sock.recvfrom(MAX_PACKET_SIZE)
-            
-            # FIXED: With #pragma pack(1) in C++, header is exactly 20 bytes.
             if len(data) < 20: continue 
 
             offset, data_len, total_size, width, height = struct.unpack('iiiii', data[:20])
+            HOST_WIDTH, HOST_HEIGHT = width, height
             
-            # Update globals for input scaling
-            HOST_WIDTH = width
-            HOST_HEIGHT = height
-            
-            # --- TEARING FIX LOGIC ---
-            # 1. New Frame Detection
+            # --- TEARING FIX ---
             if offset == 0:
                 frame_buffer = bytearray(total_size)
                 current_frame_size = total_size
                 bytes_received = 0
             
-            # 2. Frame Consistency Check
-            # If we haven't started a frame yet, or this packet says the total size is different 
-            # than what we expect for the current frame, it belongs to a different frame (old or new).
-            # We discard it to prevent mixing Frame A data into Frame B buffer (Tearing).
             if frame_buffer is None or total_size != current_frame_size:
                 continue
 
-            # 3. Store Data
             img_data = data[20:] 
             data_len_actual = len(img_data)
             
@@ -91,63 +78,44 @@ def udp_listener(host_ip):
                 frame_buffer[offset : offset + data_len_actual] = img_data
                 bytes_received += data_len_actual
 
-            # 4. Completion Check
-            # Only render if we have collected roughly the full amount of data.
-            # (>= check handles rare cases of duplicate packets overlapping)
             if bytes_received >= current_frame_size:
                 try:
                     stream = io.BytesIO(frame_buffer)
                     img = Image.open(stream)
-                    # Verify it's a valid JPEG by forcing a load
                     img.load() 
                     
                     with frame_lock:
                         current_frame = img
                     
-                    # Reset after successful render to prevent reprocessing
                     frame_buffer = None
                     bytes_received = 0
-                except Exception as e:
-                    # corrupted jpeg, ignore
-                    pass
+                except: pass
                     
         except socket.timeout:
-            # Keep alive / re-auth
             if client_sock and host_address:
                 sock.sendto(DEVICE_KEY.encode(), host_address)
         except OSError:
             break
-
     sock.close()
 
 class RemoteScreenApp:
     def __init__(self, root, host_ip):
         self.root = root
-        self.root.title("Remote Stream (MJPEG + Input)")
+        self.root.title("Remote (Fast)")
         self.root.geometry("800x600")
         
         self.label = tk.Label(root, text="Connecting...", bg="black", fg="white")
         self.label.pack(expand=True, fill=tk.BOTH)
 
-        # Touch state for "Tap to Click" vs "Drag to Hover"
         self.touch_start_x = 0
         self.touch_start_y = 0
         
-        # --- Input Bindings ---
-        # Standard Mouse Move (Desktop)
         self.label.bind('<Motion>', self.on_mouse_move)
-        
-        # Touch / Left Click Handling
-        # Replaced direct LDown/LUp with logic to separate Drag (Hover) from Tap (Click)
         self.label.bind('<Button-1>', self.on_touch_start)
         self.label.bind('<B1-Motion>', self.on_touch_move) 
         self.label.bind('<ButtonRelease-1>', self.on_touch_end)
-        
-        # Right Click (Keep standard)
-        self.label.bind('<Button-3>', lambda e: self.send_input(4, e.x, e.y, 0)) # RDown
-        self.label.bind('<ButtonRelease-3>', lambda e: self.send_input(5, e.x, e.y, 0)) # RUp
-        
-        # Keyboard
+        self.label.bind('<Button-3>', lambda e: self.send_input(4, e.x, e.y, 0))
+        self.label.bind('<ButtonRelease-3>', lambda e: self.send_input(5, e.x, e.y, 0))
         self.root.bind('<KeyPress>', self.on_key_down)
         self.root.bind('<KeyRelease>', self.on_key_up)
 
@@ -155,81 +123,58 @@ class RemoteScreenApp:
         self.thread.daemon = True
         self.thread.start()
         
-        self.update_ui()
+        # INCREASED REFRESH RATE: 10ms instead of 30ms for ~100FPS potential
+        self.update_ui_loop()
 
     def send_input(self, type_id, x, y, key):
         if not client_sock or not host_address: return
-
-        # Get current display size of the label/image
         win_w = self.label.winfo_width()
         win_h = self.label.winfo_height()
-
         if win_w == 0 or win_h == 0: return
 
-        # Scale coordinates to Host Resolution
         scaled_x = int((x / win_w) * HOST_WIDTH)
         scaled_y = int((y / win_h) * HOST_HEIGHT)
-
-        # Struct format: 4 ints (type, x, y, key)
         packet = struct.pack('iiii', type_id, scaled_x, scaled_y, key)
-        
-        try:
-            client_sock.sendto(packet, host_address)
+        try: client_sock.sendto(packet, host_address)
         except: pass
 
-    def on_mouse_move(self, event):
-        # Throttle moves if necessary, but UDP is fast
-        self.send_input(1, event.x, event.y, 0)
-
-    # --- Touch Handling Logic ---
+    def on_mouse_move(self, event): self.send_input(1, event.x, event.y, 0)
     def on_touch_start(self, event):
-        # Record start position
         self.touch_start_x = event.x
         self.touch_start_y = event.y
-        # Move cursor immediately to finger position (Hover)
         self.send_input(1, event.x, event.y, 0)
-
-    def on_touch_move(self, event):
-        # When dragging finger, treated as Moving Mouse (Hover), NOT dragging selection
-        self.send_input(1, event.x, event.y, 0)
-
+    def on_touch_move(self, event): self.send_input(1, event.x, event.y, 0)
     def on_touch_end(self, event):
-        # Check if we moved significantly
         dx = abs(event.x - self.touch_start_x)
         dy = abs(event.y - self.touch_start_y)
-        
-        # If movement is small (< 5 pixels), treat it as a TAP (Click)
         if dx < 5 and dy < 5:
-            self.send_input(2, event.x, event.y, 0) # LDown
-            self.send_input(3, event.x, event.y, 0) # LUp
-        
-        # If moved > 5 pixels, it was just a hover move, do nothing on release.
+            self.send_input(2, event.x, event.y, 0)
+            self.send_input(3, event.x, event.y, 0)
+    def on_key_down(self, event): self.send_input(6, 0, 0, event.keycode)
+    def on_key_up(self, event): self.send_input(7, 0, 0, event.keycode)
 
-    def on_key_down(self, event):
-        # event.keycode on Windows usually matches VK codes
-        self.send_input(6, 0, 0, event.keycode)
-
-    def on_key_up(self, event):
-        # event.keycode on Windows usually matches VK codes
-        self.send_input(7, 0, 0, event.keycode)
-
-    def update_ui(self):
+    def update_ui_loop(self):
         global current_frame
+        img = None
+        
         with frame_lock:
-            img = current_frame
-            current_frame = None 
+            if current_frame:
+                img = current_frame
+                current_frame = None 
 
         if img:
             win_w = self.root.winfo_width()
             win_h = self.root.winfo_height()
             if win_w > 1 and win_h > 1:
+                # NEAREST is faster than ANTIALIAS
                 img = img.resize((win_w, win_h), Image.NEAREST)
 
             photo = ImageTk.PhotoImage(img)
             self.label.config(image=photo, text="")
             self.label.image = photo
         
-        self.root.after(30, self.update_ui)
+        # Check for new frames aggressively (every 5ms)
+        self.root.after(5, self.update_ui_loop)
 
     def on_close(self):
         global is_running
