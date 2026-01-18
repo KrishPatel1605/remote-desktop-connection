@@ -70,7 +70,7 @@ void SnapOverlayToVideo()
     
     if (hVideo && IsWindowVisible(hVideo))
     {
-        RECT rcClient, rcWind;
+        RECT rcClient;
         GetClientRect(hVideo, &rcClient);
         
         // Convert client area (the video part) to screen coordinates
@@ -125,7 +125,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             FillRect(hdc, &ps.rcPaint, (HBRUSH) (COLOR_WINDOW+1));
-            // We don't draw text anymore because it obscures the video
             EndPaint(hwnd, &ps);
         }
         break;
@@ -164,6 +163,8 @@ void StartFFplay()
 
 int main()
 {
+    // REVERTED: Removed SetProcessDPIAware() based on request.
+    
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
@@ -199,7 +200,6 @@ int main()
     );
 
     // Set transparency: Alpha=1 (almost invisible) but still captures clicks
-    // If you set Alpha=0, clicks might pass through on some Windows versions
     SetLayeredWindowAttributes(g_overlayHwnd, 0, 1, LWA_ALPHA);
 
     // Start timer to follow the video window

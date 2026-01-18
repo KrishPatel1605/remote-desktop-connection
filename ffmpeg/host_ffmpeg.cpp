@@ -32,7 +32,7 @@ struct InputPacket
     int key;
 };
 
-// --- INPUT LISTENER (Same as before, keeps mouse working) ---
+// --- INPUT LISTENER ---
 void InputListener(SOCKET sock)
 {
     sockaddr_in senderAddr;
@@ -69,17 +69,11 @@ void InputListener(SOCKET sock)
 // --- FFMPEG LAUNCHER ---
 void StartFFmpeg(std::string clientIP)
 {
-    // COMMAND EXPLANATION:
-    // -f gdigrab: Capture Windows screen
-    // -framerate 30: Smooth 30fps
-    // -video_size 1280x720: Downscale for speed/bandwidth
-    // -c:v libx264: H.264 Encoder (High efficiency)
-    // -preset ultrafast: Lowest CPU usage, lowest latency
-    // -tune zerolatency: CRITICAL for real-time streaming
-    // -b:v 2000k: Limit to 2Mbps (Fixes Tailscale lag)
-    // -f mpegts: Standard streaming format for UDP
+    // CHANGED: Removed "-video_size 1280x720" from before input (-i)
+    // ADDED: "-vf scale=1280:720" to scale the FULL screen down properly
     
-    std::string cmd = "ffmpeg.exe -f gdigrab -framerate 30 -video_size 1280x720 -i desktop "
+    std::string cmd = "ffmpeg.exe -f gdigrab -framerate 30 -i desktop "
+                      "-vf scale=1280:720 "
                       "-c:v libx264 -preset ultrafast -tune zerolatency "
                       "-b:v 2000k -f mpegts udp://" + clientIP + ":50006?pkt_size=1316";
 
@@ -93,7 +87,6 @@ void StartFFmpeg(std::string clientIP)
     ZeroMemory(&pi, sizeof(pi));
 
     // Create the FFmpeg process
-    // We use a mutable char buffer because CreateProcessA requires it
     std::vector<char> cmdBuffer(cmd.begin(), cmd.end());
     cmdBuffer.push_back(0);
 
@@ -103,12 +96,10 @@ void StartFFmpeg(std::string clientIP)
         return;
     }
 
-    // Wait until the user closes THIS console, then kill FFmpeg
     std::cout << "------------------------------------------------\n";
     std::cout << "  STREAM IS LIVE. CLOSE THIS WINDOW TO STOP.    \n";
     std::cout << "------------------------------------------------\n";
     
-    // Simple way to keep main thread alive while FFmpeg runs
     WaitForSingleObject(pi.hProcess, INFINITE);
 
     CloseHandle(pi.hProcess);
@@ -117,7 +108,7 @@ void StartFFmpeg(std::string clientIP)
 
 int main()
 {
-    // 1. Setup Screen Metrics
+    // 1. Setup Screen Metrics (DPI Aware to get real screen size)
     SetProcessDPIAware();
     g_screenW = GetSystemMetrics(SM_CXSCREEN);
     g_screenH = GetSystemMetrics(SM_CYSCREEN);
