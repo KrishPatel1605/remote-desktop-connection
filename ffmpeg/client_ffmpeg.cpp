@@ -70,6 +70,17 @@ void SnapOverlayToVideo()
     
     if (hVideo && IsWindowVisible(hVideo))
     {
+        // --- Z-ORDER FIX ---
+        // Make the Overlay "Owned" by the Video Window.
+        // This ensures the Overlay moves in the Z-order STACK with the video.
+        // If Video goes behind VSCode, Overlay goes behind too.
+        static HWND hCurrentOwner = NULL;
+        if (hCurrentOwner != hVideo)
+        {
+            SetWindowLongPtr(g_overlayHwnd, GWLP_HWNDPARENT, (LONG_PTR)hVideo);
+            hCurrentOwner = hVideo;
+        }
+
         RECT rcClient;
         GetClientRect(hVideo, &rcClient);
         
@@ -81,14 +92,17 @@ void SnapOverlayToVideo()
         int width = rcClient.right - rcClient.left;
         int height = rcClient.bottom - rcClient.top;
 
-        // Only move if changed to prevent jitter
+        // Check if move is needed to prevent jitter
         RECT rcOverlay;
         GetWindowRect(g_overlayHwnd, &rcOverlay);
-        if (rcOverlay.left != pt.x || rcOverlay.top != pt.y || (rcOverlay.right - rcOverlay.left) != width)
+        
+        if (rcOverlay.left != pt.x || rcOverlay.top != pt.y || 
+            (rcOverlay.right - rcOverlay.left) != width || 
+            (rcOverlay.bottom - rcOverlay.top) != height)
         {
-            MoveWindow(g_overlayHwnd, pt.x, pt.y, width, height, TRUE);
-            // Ensure overlay is ALWAYS on top of the video
-            SetWindowPos(g_overlayHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            // Use SWP_NOZORDER so we don't force it to top/bottom manually.
+            // The "Owner" relationship handles the Z-order for us.
+            SetWindowPos(g_overlayHwnd, NULL, pt.x, pt.y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
 }
@@ -190,8 +204,9 @@ int main()
     RegisterClassW(&wc);
 
     // Create a POPUP window (no border) so it looks like part of the video
+    // REMOVED WS_EX_TOPMOST to allow it to go behind other windows
     g_overlayHwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, // Topmost, no taskbar entry
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW, // Toolwindow hides it from alt-tab (optional)
         L"InputClient", 
         L"Overlay", 
         WS_POPUP | WS_VISIBLE, 
